@@ -1,0 +1,147 @@
+//+------------------------------------------------------------------+
+//|                                                    Bollinger.mq5 |
+//|                              Copyright 2023, Eric Miranda Britto |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, Eric Miranda Britto"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+
+// Include Trade class
+#include <Trade\Trade.mqh>
+CTrade Trade;
+
+//--- input parameters
+input int    InpMagicNumber = 212312365;
+input double  pontos_entrada = 10.0;
+ double numContratos   = 0.01;    // Agora definido para 0.01 contratos
+
+//--- indicator's handles
+int bollingerHandle;
+
+//--- global variables
+datetime lastTradeTime = 0; // Tempo da última entrada de trade
+double min_0 = 0; //minima dos ultimos x periodos
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   // Initialize Bollinger Bands indicator
+   bollingerHandle = iBands(_Symbol, PERIOD_M30, 200, 0, 2.0, PRICE_LOW);
+   if(bollingerHandle == INVALID_HANDLE)
+     {
+      Print("Invalid Bollinger Bands handle, error: ", GetLastError());
+      return(INIT_FAILED);
+     }
+   // Initialize trade object
+   Trade.SetExpertMagicNumber(InpMagicNumber);
+   
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   datetime currentTime = TimeCurrent();
+   
+   // Verifica se já se passaram 30 minutos desde a última entrada
+   if(currentTime >= lastTradeTime + 1800) // 1800 segundos = 30 minutos
+     {
+      // Obtém dados do candle anterior
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int copied = CopyRates(_Symbol, PERIOD_M30, 1, 1, rates);
+      if(copied < 1)
+        {
+         Print("Failed to get candle data");
+         return;
+        }
+      
+      // Obtém o valor da Banda Inferior de Bollinger no candle anterior
+      double BollingerLowerArray[];
+      ArraySetAsSeries(BollingerLowerArray, true);
+      int copiedBB = CopyBuffer(bollingerHandle, 2, 1, 1, BollingerLowerArray);
+      if(copiedBB < 1)
+        {
+         Print("Failed to get Bollinger Band data");
+         return;
+        }
+      
+      // Verifica a condição de entrada
+      if(rates[0].open < BollingerLowerArray[0] && rates[0].close > BollingerLowerArray[0])
+        {
+         // Condição de entrada atendida, procede para abrir posição de compra
+         
+         // Obtém a mínima das mínimas dos últimos 20 candles
+         MqlRates rates20[];
+         ArraySetAsSeries(rates20, true);
+         int copied20 = CopyRates(_Symbol, PERIOD_M30, 1, 20, rates20);
+         if(copied20 < 20)
+           {
+            Print("Failed to get last 20 candles data");
+            return;
+           }
+         
+         double minLow = rates20[0].low;
+         for(int i = 1; i < 20; i++)
+           {
+            if(rates20[i].low < minLow)
+               minLow = rates20[i].low;
+           }
+         
+         // Abre posição de compra com stop loss na mínima dos últimos 20 candles
+         double price  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double sl     = minLow;
+         double tp     = 0; // Sem take profit definido
+         double volume = numContratos; // Agora definido como 0.01
+         string comment = "Bollinger Buy Entry";
+         
+         if( sl != min_0)
+         {
+            Trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, volume, price, sl, tp, comment);
+            min_0 = minLow;
+         }
+         
+         
+         
+         // Atualiza o tempo da última entrada
+         lastTradeTime = currentTime;
+        }
+     }
+   
+   // Para todas as posições abertas, verifica se o stop loss deve ser movido
+   int totalPositions = PositionsTotal();
+   for(int i = 0; i < totalPositions; i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         // Verifica se a posição é para o símbolo atual e tem o magic number correto
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+           {
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            if(posType == POSITION_TYPE_BUY)
+              {
+               double entryPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
+               double sl           = PositionGetDouble(POSITION_SL);
+               double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+               
+               // Calcula a diferença de preço
+               double priceDifference = entryPrice - sl;
+               double targetPrice     = entryPrice + priceDifference;
+               
+               if(currentPrice > targetPrice)
+                 {
+                  // Move o stop loss para o preço de entrada
+                  double tp = PositionGetDouble(POSITION_TP); // Mantém o take profit atual
+                  Trade.PositionModify(ticket, entryPrice + pontos_entrada, tp);
+                 }
+              }
+           }
+        }
+     }
+  }
